@@ -1,0 +1,75 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for pushing to the repository
+      contents: write
+      
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch all history for tags
+          
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+      
+      - name: Extract version from tag
+        if: github.event_name == 'release'
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          VERSION=${VERSION#v}  # Remove 'v' prefix if present
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Version: $VERSION"
+      
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+      
+      - name: Update version in pyproject.toml
+        if: github.event_name == 'release'
+        run: |
+          CURRENT_VERSION=$(poetry version -s)
+          if [ "$VERSION" != "$CURRENT_VERSION" ]; then
+            echo "Updating version from $CURRENT_VERSION to $VERSION"
+            poetry version $VERSION
+            git add pyproject.toml
+            git commit -m "Bump version to $VERSION [skip ci]"
+            git push
+          else
+            echo "Version in pyproject.toml already matches $VERSION, no update needed"
+          fi
+          
+      - name: Install dependencies
+        run: |
+          poetry install
+      
+      - name: Run tests
+        run: |
+          poetry run pytest
+      
+      - name: Build package
+        run: |
+          poetry build
+      
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
+          skip-existing: true
