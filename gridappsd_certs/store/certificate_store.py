@@ -290,17 +290,32 @@ class CertificateStore:
         private_key: Optional[Union[rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey]] = None,
         alias: Optional[str] = None
     ):
-        """Save a certificate to storage."""
+        """Save a certificate to storage based on its type."""
         if not self.storage_path:
             return
         
         # Create storage directory if it doesn't exist
         self.storage_path.mkdir(parents=True, exist_ok=True)
         
-        # Generate filenames
-        safe_fingerprint = fingerprint.replace(':', '_')
-        cert_filename = f"{safe_fingerprint}.cert.pem"
-        key_filename = f"{safe_fingerprint}.key.pem" if private_key else None
+        # Determine certificate type and appropriate filename prefix
+        cert_type, identifier = self._determine_certificate_type(certificate, alias)
+        
+        # Generate filenames based on type
+        if cert_type == "device":
+            prefix = f"device_{identifier}"
+        elif cert_type == "ca":
+            prefix = "ca"
+        elif cert_type == "server":
+            # Use domain name for server certificates
+            domain = identifier.replace("*.", "wildcard_")  # Handle wildcards in domain
+            prefix = f"server_{domain}"
+        else:  # fallback to fingerprint
+            safe_fingerprint = fingerprint.replace(':', '_')
+            prefix = safe_fingerprint
+        
+        # The rest of the method remains the same...
+        cert_filename = f"{prefix}.cert.pem"
+        key_filename = f"{prefix}.key.pem" if private_key else None
         
         # Save certificate
         cert_path = self.storage_path / cert_filename
@@ -341,15 +356,17 @@ class CertificateStore:
         entry.update({
             'cert_file': cert_filename,
             'subject': self._format_subject(certificate.subject),
-            'not_before': int(certificate.not_valid_before.timestamp()),  # As integer
-            'not_after': int(certificate.not_valid_after.timestamp()),    # As integer
-            'alias': alias
+            'not_before': int(certificate.not_valid_before.timestamp()),
+            'not_after': int(certificate.not_valid_after.timestamp()),
+            'alias': alias,
+            'cert_type': cert_type,
+            'identifier': identifier
         })
         
         if key_filename:
             entry.update({
                 'key_file': key_filename,
-                'key_encrypted': False  # We're not encrypting keys in this example
+                'key_encrypted': False
             })
         
         with open(index_path, 'w') as f:
@@ -392,3 +409,148 @@ class CertificateStore:
             oid_name = attr.oid._name
             parts.append(f"{oid_name}={attr.value}")
         return ", ".join(parts)
+    
+    def _determine_certificate_type(self, certificate: x509.Certificate, alias: Optional[str] = None) -> Tuple[str, str]:
+        """
+        Determine the type of certificate (device, CA, or server) and its identifier.
+        
+        Args:
+            certificate: The X.509 certificate to analyze
+            alias: Optional alias that might contain type information
+            
+        Returns:
+            Tuple of (cert_type, identifier) where:
+            - cert_type is one of "device", "ca", "server", or "unknown"
+            - identifier is a unique identifier (e.g., device ID, domain name) or empty string
+        """
+        # Check if it's a CA certificate
+        try:
+            basic_constraints = certificate.extensions.get_extension_for_class(x509.BasicConstraints)
+            if basic_constraints.value.ca:
+                # It's a CA certificate
+                common_name = self._get_common_name(certificate) or "root"
+                return "ca", common_name
+        except x509.extensions.ExtensionNotFound:
+            pass
+        
+        # Check for device identifier in Subject Alternative Name
+        try:
+            san_ext = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            
+            # For server certificates, look for DNS names
+            dns_names = [name.value for name in san_ext.value if isinstance(name, x509.DNSName)]
+            if dns_names:
+                # Check for server auth EKU
+                try:
+                    ext_key_usage = certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+                    if ExtendedKeyUsageOID.SERVER_AUTH in ext_key_usage.value:
+                        # Server certificate with DNS names - use primary domain
+                        return "server", dns_names[0]
+                except x509.extensions.ExtensionNotFound:
+                    pass
+            
+            # For device certificates, look for URIs with UUID
+            for san in san_ext.value:
+                if isinstance(san, x509.UniformResourceIdentifier):
+                    uri = san.value
+                    if uri.startswith("urn:uuid:"):
+                        # This is likely a device certificate with a UUID-based identifier
+                        device_id = uri.replace("urn:uuid:", "")
+                        return "device", device_id
+        except x509.extensions.ExtensionNotFound:
+            pass
+        
+        # Check if alias provides type information
+        if alias:
+            if alias.lower() == "ca" or "ca" in alias.lower():
+                common_name = self._get_common_name(certificate) or "root"
+                return "ca", common_name
+            elif "device" in alias.lower():
+                # Extract device ID from alias if possible
+                if "_" in alias:
+                    parts = alias.split("_", 1)
+                    if len(parts) > 1:
+                        return "device", parts[1]
+                return "device", alias
+            elif "server" in alias.lower() or "web" in alias.lower():
+                # For server alias, try to get the domain from Common Name
+                common_name = self._get_common_name(certificate)
+                if common_name and ("." in common_name):  # Simple check for a domain name
+                    return "server", common_name
+        
+        # Use Common Name for identifying certificate type/ID
+        common_name = self._get_common_name(certificate)
+        if common_name:
+            # Check if CN looks like a domain name for server certificates
+            if "." in common_name and len(common_name.split(".")) > 1:
+                # Verify if it has SERVER_AUTH EKU
+                try:
+                    ext_key_usage = certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+                    if ExtendedKeyUsageOID.SERVER_AUTH in ext_key_usage.value:
+                        return "server", common_name
+                except x509.extensions.ExtensionNotFound:
+                    pass
+            
+            # If CN looks like a device ID or has CLIENT_AUTH only
+            if common_name.isdigit() or "device" in common_name.lower():
+                return "device", common_name
+        
+        # Check for CLIENT_AUTH without SERVER_AUTH
+        try:
+            ext_key_usage = certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+            if ExtendedKeyUsageOID.CLIENT_AUTH in ext_key_usage.value:
+                if ExtendedKeyUsageOID.SERVER_AUTH not in ext_key_usage.value:
+                    # It's a client-only certificate, likely a device
+                    # Try to find a suitable identifier
+                    if device_id := self._extract_device_id_from_certificate(certificate):
+                        return "device", device_id
+        except x509.extensions.ExtensionNotFound:
+            pass
+        
+        # Check if we can derive an LFDI (which would indicate a device certificate)
+        try:
+            lfdi = calculate_lfdi_from_certificate(certificate)
+            if lfdi:
+                return "device", lfdi
+        except Exception:
+            pass
+        
+        # If we can't determine the type, use fingerprint as fallback
+        fingerprint = self._get_fingerprint(certificate)
+        return "unknown", fingerprint[:8]  # Use first 8 characters of fingerprint
+
+    def _extract_device_id_from_certificate(self, certificate: x509.Certificate) -> Optional[str]:
+        """Extract a device ID from certificate attributes."""
+        # Try to get serial number from subject
+        for attr in certificate.subject:
+            if attr.oid == NameOID.SERIAL_NUMBER:
+                return attr.value
+        
+        # Try common name if it looks like an ID
+        common_name = self._get_common_name(certificate)
+        if common_name and (common_name.startswith("Device") or common_name.isdigit()):
+            return common_name
+        
+        # If device_id was passed in your test case
+        try:
+            sans = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            for san in sans:
+                if isinstance(san, x509.UniformResourceIdentifier) and "uuid" in san.value:
+                    return san.value.split(":")[-1]
+        except x509.extensions.ExtensionNotFound:
+            pass
+        
+        return None
+    
+    def _extract_uri_device_id(self, certificate: x509.Certificate) -> Optional[str]:
+        """Extract device ID from URI Subject Alternative Name."""
+        try:
+            san_ext = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            for san in san_ext.value:
+                if isinstance(san, x509.UniformResourceIdentifier):
+                    uri = san.value
+                    if uri.startswith("urn:uuid:"):
+                        return uri.replace("urn:uuid:", "")
+        except x509.extensions.ExtensionNotFound:
+            pass
+        return None

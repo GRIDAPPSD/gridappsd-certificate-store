@@ -197,7 +197,6 @@ class DeviceCertificateGenerator:
         ).add_extension(
             x509.ExtendedKeyUsage([
                 ExtendedKeyUsageOID.CLIENT_AUTH,
-                ExtendedKeyUsageOID.SERVER_AUTH,
             ]), critical=True
         ).add_extension(
             x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False
@@ -335,7 +334,7 @@ class DeviceCertificateGenerator:
         return certificate, private_key
     
     def create_web_certificate(self, subject_attributes, issuer_cert, issuer_key,
-                              valid_days=365, private_key=None, domains=None):
+                          valid_days=365, private_key=None, domains=None):
         """
         Create a certificate for web server use.
         
@@ -350,16 +349,71 @@ class DeviceCertificateGenerator:
         Returns:
             tuple: (certificate, private_key)
         """
-        # Reusing the device certificate logic with web-specific parameters
-        return self.create_device_certificate(
-            subject_attributes=subject_attributes,
-            issuer_cert=issuer_cert,
-            issuer_key=issuer_key,
-            valid_days=valid_days,
-            private_key=private_key,
-            san_type='dns',
-            san_values=domains
+        if issuer_key is None:
+            raise TypeError("Issuer private key cannot be None")
+        
+        private_key = private_key or self.generate_private_key()
+        public_key = private_key.public_key()
+        
+        subject = self._build_name(subject_attributes)
+        
+        # Certificate serial number
+        serial = x509.random_serial_number()
+        
+        # Build the certificate
+        cert_builder = x509.CertificateBuilder().subject_name(
+            subject
+        ).issuer_name(
+            issuer_cert.subject
+        ).public_key(
+            public_key
+        ).serial_number(
+            serial
+        ).not_valid_before(
+            datetime.datetime.utcnow()
+        ).not_valid_after(
+            datetime.datetime.utcnow() + datetime.timedelta(days=valid_days)
+        ).add_extension(
+            x509.BasicConstraints(ca=False, path_length=None), critical=True
+        ).add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=True,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False, 
+                encipher_only=False,
+                decipher_only=False
+            ), critical=True
+        ).add_extension(
+            x509.ExtendedKeyUsage([
+                ExtendedKeyUsageOID.SERVER_AUTH,  # Primary purpose is server authentication
+                ExtendedKeyUsageOID.CLIENT_AUTH,  # Optionally include client auth for mutual TLS
+            ]), critical=True
+        ).add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False
+        ).add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key()),
+            critical=False
         )
+        
+        # Add subject alternative names for domains
+        if domains:
+            san_objects = [x509.DNSName(domain) for domain in domains]
+            cert_builder = cert_builder.add_extension(
+                x509.SubjectAlternativeName(san_objects),
+                critical=False
+            )
+        
+        # Sign the certificate with the issuer's private key
+        certificate = cert_builder.sign(
+            private_key=issuer_key, 
+            algorithm=hashes.SHA256()
+        )
+        
+        return certificate, private_key
     
     def _build_name(self, attributes):
         """Build an X.509 name from attributes dictionary."""

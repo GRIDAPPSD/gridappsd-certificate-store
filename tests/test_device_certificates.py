@@ -37,7 +37,7 @@ def test_device_certificate_creation(cert_generator, ca_certificate, device_attr
     eku_ext = device_cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
     assert eku_ext.critical
     assert x509.ExtendedKeyUsageOID.CLIENT_AUTH in eku_ext.value
-    assert x509.ExtendedKeyUsageOID.SERVER_AUTH in eku_ext.value
+    assert x509.ExtendedKeyUsageOID.SERVER_AUTH not in eku_ext.value
 
 
 def test_device_certificate_with_device_id(cert_generator, ca_certificate, device_attrs):
