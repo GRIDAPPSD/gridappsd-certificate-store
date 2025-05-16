@@ -1,1 +1,1 @@
-from gridappsd_certs.device_certs import DeviceCertificateGenerator
+from gridappsd_certs.generator import DeviceCertificateGenerator

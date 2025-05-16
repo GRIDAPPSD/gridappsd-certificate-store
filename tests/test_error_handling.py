@@ -6,7 +6,7 @@ from cryptography import x509
 
 def test_invalid_key_type_raises_error():
     """Test that an invalid key type raises a ValueError."""
-    from gridappsd_certs.device_certs import DeviceCertificateGenerator
+    from gridappsd_certs.generator import DeviceCertificateGenerator
     
     with pytest.raises(ValueError, match="Invalid key type"):
         DeviceCertificateGenerator(key_type='invalid_type')
