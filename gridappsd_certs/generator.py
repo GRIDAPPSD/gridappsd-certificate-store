@@ -7,6 +7,8 @@ IEEE 2030.5, general IoT devices, and other secure communication protocols.
 """
 
 import datetime
+from ipaddress import ip_address
+from enum import Enum
 import uuid
 from cryptography import x509
 from cryptography.x509.oid import NameOID, ExtensionOID
@@ -16,6 +18,11 @@ from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.x509 import ExtendedKeyUsageOID
 
 
+class ContentType(Enum):
+    """Supported content types for IEEE 2030.5 communications."""
+    XML = "application/xml"
+    JSON = "application/json"
+    EXI = "application/exi"  # Efficient XML Interchange
 class DeviceCertificateGenerator:
     """Generator for X.509 certificates for secure device communications."""
     
