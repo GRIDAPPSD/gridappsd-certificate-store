@@ -6,14 +6,25 @@ on:
   workflow_dispatch:  # Allows manual triggering
 
 jobs:
-  deploy:
+  # Call the existing test workflow first
+  test:
+    uses: ./.github/workflows/python-test.yml
+    # If your test workflow needs any secrets or inputs, provide them here
+    # with:
+    #   input1: value1
+    # secrets:
+    #   secret1: ${{ secrets.SECRET1 }}
+
+  # Only proceed to publish if tests passed
+  publish:
+    needs: test  # Depend on the test job
     runs-on: ubuntu-latest
     permissions:
-      # Required for pushing to the repository
-      contents: write
+      contents: write  # Required for pushing to the repository
       
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0  # Fetch all history for tags
           
@@ -42,7 +53,42 @@ jobs:
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
       
+      - name: Determine source branch
+        id: branch
+        run: |
+          # Find the branch that the release tag points to
+          if [ "${{ github.event_name }}" == "release" ]; then
+            TARGET_BRANCH="${{ github.event.release.target_commitish }}"
+            echo "Source branch for release: $TARGET_BRANCH"
+          else
+            TARGET_BRANCH="${GITHUB_REF#refs/heads/}"
+            echo "Workflow triggered from branch: $TARGET_BRANCH"
+          fi
+          
+          if [ -z "$TARGET_BRANCH" ] || [ "$TARGET_BRANCH" == "HEAD" ]; then
+            TARGET_BRANCH="main"  # or your default branch name
+            echo "Target branch not determined, falling back to: $TARGET_BRANCH"
+          fi
+          
+          echo "BRANCH=$TARGET_BRANCH" >> $GITHUB_ENV
+          echo "branch=$TARGET_BRANCH" >> $GITHUB_OUTPUT
+      
+      - name: Verify branch exists
+        run: |
+          git fetch --all
+          if ! git show-ref --quiet "refs/remotes/origin/$BRANCH"; then
+            echo "Error: Branch $BRANCH does not exist on origin"
+            echo "Cannot update version in repository"
+            exit 1
+          fi
+      
+      - name: Checkout source branch
+        run: |
+          echo "Checking out branch: $BRANCH"
+          git checkout "$BRANCH" || git checkout -b "$BRANCH" "origin/$BRANCH"
+      
       - name: Update version in pyproject.toml
+        id: version_update
         if: github.event_name == 'release'
         run: |
           CURRENT_VERSION=$(poetry version -s)
@@ -51,25 +97,25 @@ jobs:
             poetry version $VERSION
             git add pyproject.toml
             git commit -m "Bump version to $VERSION [skip ci]"
-            git push
+            
+            # Strict push - fail if can't update repository
+            git push origin "$BRANCH"
+            echo "updated=true" >> $GITHUB_OUTPUT
           else
             echo "Version in pyproject.toml already matches $VERSION, no update needed"
+            echo "updated=false" >> $GITHUB_OUTPUT
           fi
           
       - name: Install dependencies
         run: |
           poetry install
       
-      - name: Run tests
+      - name: Quick build verification
         run: |
-          poetry run pytest
-      
-      - name: Build package
-        run: |
+          # Just a quick smoke test to ensure the package builds correctly
           poetry build
       
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_TOKEN }}
-          skip-existing: true
+        # Only proceed if version update succeeded or was not needed
+        if: success() && (steps.version_update.outputs.updated == 'false' || steps.version_update.outputs.updated == 'true')
+        uses: pypa/gh-action-pypi-publish@
