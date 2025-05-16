@@ -10,7 +10,7 @@ license = "BSD-3-Clause"
 packages = [{include = "gridappsd_certs"}]
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = "^3.10"
 cryptography = "^41.0.0"
 ipaddress = "^1.0.23"
 
