@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # Required for pushing to the repository
+      id-token: write # Required for publishing to PyPI
       
     steps:
       - name: Checkout repository
